@@ -37,17 +37,36 @@ if [ "$SPECIES" = "dragon" ]; then REACTION=""; ACHIEVEMENT=""; fi
 E=$(jq -r '.eye // "°"' "$STATE" 2>/dev/null)
 
 STDIN_JSON=$(cat)  # Claude Code passes session JSON on stdin
+# Activity files are keyed by Claude Code session_id (unique per session, even
+# outside tmux) so concurrent sessions/projects don't clobber each other; fall
+# back to the tmux-pane SID used elsewhere.
+ASID=$(printf '%s' "$STDIN_JSON" | jq -r '.session_id // empty' 2>/dev/null)
+[ -z "$ASID" ] && ASID="$SID"
 
-# ─── Clawd activity state: idle time since last transcript write ─────────────
-# work = actively writing (<30s), rest = idle 30s-3m, sleep = idle 3m+
+# ─── Clawd activity state: driven by turn lifecycle (prompt/stop hooks) ──────
+# Hooks stamp the session's turn boundaries (epoch seconds, per $ASID):
+#   activity_prompt.$ASID = user submitted  → a turn STARTED
+#   activity_stop.$ASID   = Claude finished → the turn ENDED, idle clock starts
+# work = a turn is in progress (prompt newer than stop) — holds the WHOLE turn,
+#        no matter how long tools/thinking take. rest = idle <3m, sleep = idle 3m+.
 CLAWD_STATE=rest
 if [ "$SPECIES" = "dragon" ]; then
-  TRANSCRIPT=$(printf '%s' "$STDIN_JSON" | jq -r '.transcript_path // empty' 2>/dev/null)
-  if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-    _mt=$(stat -f %m "$TRANSCRIPT" 2>/dev/null || echo 0)
-    _now=$(date +%s)
-    _idle=$(( _now - _mt ))
-    if   [ "$_idle" -lt 30 ];  then CLAWD_STATE=work
+  _now=$(date +%s)
+  _p=$(cat "$HOME/.claude-buddy/activity_prompt.$ASID" 2>/dev/null)
+  _s=$(cat "$HOME/.claude-buddy/activity_stop.$ASID" 2>/dev/null)
+  case "$_p" in ''|*[!0-9]*) _p=0 ;; esac
+  case "$_s" in ''|*[!0-9]*) _s=0 ;; esac
+  # idle reference = most recent stamp. work only if a turn is open (prompt newer
+  # than stop) AND not stale: WORK_TTL guards against a missed Stop (crash/quit/
+  # /clear) that would otherwise freeze 열일중 forever — a stale prompt ages into
+  # rest/sleep like any idle. Clock-jump safe (negative idle clamped to 0).
+  WORK_TTL=1800
+  _ref=$_s; [ "$_p" -gt "$_s" ] && _ref=$_p
+  if [ "$_p" -gt "$_s" ] && [ $(( _now - _p )) -lt "$WORK_TTL" ]; then
+    CLAWD_STATE=work                         # turn in progress
+  else
+    _idle=$(( _now - _ref )); [ "$_idle" -lt 0 ] && _idle=0
+    if   [ "$_ref" -eq 0 ];    then CLAWD_STATE=rest    # no turn seen yet
     elif [ "$_idle" -lt 180 ]; then CLAWD_STATE=rest
     else CLAWD_STATE=sleep; fi
   fi
@@ -55,7 +74,7 @@ if [ "$SPECIES" = "dragon" ]; then
   case "$CLAWD_STATE" in
     work)  NAME="클코 열일중" ;;
     rest)  NAME="클코 쉬는중..." ;;
-    sleep) NAME="클코 잠듬..." ;;
+    sleep) NAME="클코 잠듦..." ;;
   esac
 fi
 
