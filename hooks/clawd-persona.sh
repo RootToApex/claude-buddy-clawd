@@ -21,10 +21,13 @@ MUTED=$(jq -r '.muted // false' "$STATUS_FILE" 2>/dev/null)
 NAME=$(jq -r '.name // "클코"' "$STATUS_FILE" 2>/dev/null)
 [ -z "$NAME" ] && NAME="클코"
 
-# On /clear, stamp a fresh-start marker (status line can show a "shower" pose).
+# On /clear, stamp a fresh-start marker (status line shows the "shower" pose).
+# Key by session_id (matches the status line's ASID), fall back to tmux pane.
 if [ "$SRC" = "clear" ]; then
+  ASID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+  [ -z "$ASID" ] && ASID="${TMUX_PANE:-default}"
   mkdir -p "$STATE_DIR" 2>/dev/null
-  date +%s > "$STATE_DIR/activity_clear.${TMUX_PANE:-default}" 2>/dev/null
+  date +%s > "$STATE_DIR/activity_clear.$ASID" 2>/dev/null
 fi
 
 CTX="You have a pixel status-line companion named ${NAME} — a small dragon (the Clawd mascot) who watches from the status line.

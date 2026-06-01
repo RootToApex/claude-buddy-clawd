@@ -27,12 +27,14 @@ NAME=$(jq -r '.name // ""' "$STATE" 2>/dev/null)
 [ -z "$NAME" ] && exit 0
 
 SPECIES=$(jq -r '.species // ""' "$STATE" 2>/dev/null)
+# Clawd is its own species "clawd" (canonical); "dragon" kept as a legacy alias.
+case "$SPECIES" in dragon|clawd) IS_CLAWD=1 ;; *) IS_CLAWD=0 ;; esac
 HAT=$(jq -r '.hat // "none"' "$STATE" 2>/dev/null)
 RARITY=$(jq -r '.rarity // "common"' "$STATE" 2>/dev/null)
 REACTION=$(jq -r '.reaction // ""' "$STATE" 2>/dev/null)
 ACHIEVEMENT=$(jq -r '.achievement // ""' "$STATE" 2>/dev/null)
 # Clawd (dragon slot): no speech bubble — mood shows via expression/pose only
-if [ "$SPECIES" = "dragon" ]; then REACTION=""; ACHIEVEMENT=""; fi
+if [ "$IS_CLAWD" = 1 ]; then REACTION=""; ACHIEVEMENT=""; fi
 # eye is written to status.json by writeStatusState (v2+); fall back to "°"
 E=$(jq -r '.eye // "°"' "$STATE" 2>/dev/null)
 
@@ -49,33 +51,40 @@ ASID=$(printf '%s' "$STDIN_JSON" | jq -r '.session_id // empty' 2>/dev/null)
 #   activity_stop.$ASID   = Claude finished → the turn ENDED, idle clock starts
 # work = a turn is in progress (prompt newer than stop) — holds the WHOLE turn,
 #        no matter how long tools/thinking take. rest = idle <3m, sleep = idle 3m+.
-CLAWD_STATE=rest
-if [ "$SPECIES" = "dragon" ]; then
+# 우선순위: shower(/clear 직후) > idea(막 입력함) > work(턴 진행) > wait(idle<5m) > sleep
+CLAWD_STATE=wait
+if [ "$IS_CLAWD" = 1 ]; then
   _now=$(date +%s)
   _p=$(cat "$HOME/.claude-buddy/activity_prompt.$ASID" 2>/dev/null)
   _s=$(cat "$HOME/.claude-buddy/activity_stop.$ASID" 2>/dev/null)
+  _c=$(cat "$HOME/.claude-buddy/activity_clear.$ASID" 2>/dev/null)
   case "$_p" in ''|*[!0-9]*) _p=0 ;; esac
   case "$_s" in ''|*[!0-9]*) _s=0 ;; esac
-  # idle reference = most recent stamp. work only if a turn is open (prompt newer
-  # than stop) AND not stale: WORK_TTL guards against a missed Stop (crash/quit/
-  # /clear) that would otherwise freeze 열일중 forever — a stale prompt ages into
-  # rest/sleep like any idle. Clock-jump safe (negative idle clamped to 0).
-  WORK_TTL=1800
+  case "$_c" in ''|*[!0-9]*) _c=0 ;; esac
+  WORK_TTL=1800                              # missed Stop(크래시/clear) 시 영구 열일중 방지
   _ref=$_s; [ "$_p" -gt "$_s" ] && _ref=$_p
-  if [ "$_p" -gt "$_s" ] && [ $(( _now - _p )) -lt "$WORK_TTL" ]; then
-    CLAWD_STATE=work                         # turn in progress
+  if   [ "$_c" -gt 0 ] && [ $(( _now - _c )) -lt 6 ]; then CLAWD_STATE=shower
+  elif [ "$_p" -gt "$_s" ] && [ $(( _now - _p )) -lt "$WORK_TTL" ]; then
+    if [ $(( _now - _p )) -lt 4 ]; then CLAWD_STATE=idea; else CLAWD_STATE=work; fi
   else
     _idle=$(( _now - _ref )); [ "$_idle" -lt 0 ] && _idle=0
-    if   [ "$_ref" -eq 0 ];    then CLAWD_STATE=rest    # no turn seen yet
-    elif [ "$_idle" -lt 180 ]; then CLAWD_STATE=rest
-    else CLAWD_STATE=sleep; fi
+    if   [ "$_ref" -eq 0 ];    then CLAWD_STATE=wait    # 아직 턴 없음
+    elif [ "$_idle" -lt 180 ]; then CLAWD_STATE=wait    # 0~3분: 기다리는중(모래시계)
+    elif [ "$_idle" -lt 600 ]; then CLAWD_STATE=rest    # 3~10분: 쉬는중(커피)
+    else CLAWD_STATE=sleep; fi                          # 10분+: 잠듦(zzz)
   fi
   [ -n "$CLAWD_STATE_OVERRIDE" ] && CLAWD_STATE="$CLAWD_STATE_OVERRIDE"
+  # 라벨: 상태별 짧은 드립 풀에서 자동 선택 (상태 인스턴스마다 안정적 = 초당 깜빡임 없음)
   case "$CLAWD_STATE" in
-    work)  NAME="클코 열일중" ;;
-    rest)  NAME="클코 쉬는중..." ;;
-    sleep) NAME="클코 잠듦..." ;;
+    idea)   POOL=( "오 그거 좋은데" "받았다, 가보자고" "번뜩" );        seed=$_p ;;
+    work)   POOL=( "코드 조지는 중" "일하는 척" "키보드 혹사중" );      seed=$_p ;;
+    wait)   POOL=( "...아직 안 보냄?" "님 기다리는 중" "타자 구경중" ); seed=$_s ;;
+    rest)   POOL=( "커피 타임" "한 박자 쉼" "당 충전중" );              seed=$_s ;;
+    sleep)  POOL=( "Zzz 깨우지 마" "충전중" "꿈에서 코딩중" );          seed=$_s ;;
+    shower) POOL=( "기억 싹 헹구는 중~" "방금 다 까먹음" "머리 비우니 개운" "새 사람 됐다" ); seed=$_c ;;
+    *)      POOL=( "클코" ); seed=0 ;;
   esac
+  NAME="${POOL[$(( seed % ${#POOL[@]} ))]}"
 fi
 
 # ─── Animation: frame from timestamp ─────────────────────────────────────────
@@ -157,6 +166,8 @@ clawd_attach_right() {
 # Clawd bitmaps — work: eyes shifted right (looks at laptop). closed: eyes = low line.
 CLAWD_WORK=(   "0011111111111100" "0011111111111100" "0011112211112200" "0111112211112210" "0111111111111110" "0011111111111100" "0011111111111100" "0011011001101100" "0011011001101100" )
 CLAWD_CLOSED=( "0011111111111100" "0011111111111100" "0011111111111100" "0111221111221110" "0111111111111110" "0011111111111100" "0011111111111100" "0011011001101100" "0011011001101100" )
+# open: eyes emptied (transparent) — same spot/width as closed, just hollow (눈 뜸)
+CLAWD_OPEN=(   "0011111111111100" "0011111111111100" "0011001111001100" "0111001111001110" "0111111111111110" "0011111111111100" "0011111111111100" "0011011001101100" "0011011001101100" )
 # Props — laptop (thin side, screen tilts right), coffee (cup + steam)
 LAPTOP=( "0000000044" "0000000440" "0000004400" "0000044000" "0000440000" "0004400000" "5555550000" "5555550000" )
 COFFEE=( "000080800" "000808000" "077777700" "076666700" "077777700" "077777700" "007777700" "000000000" )
@@ -181,120 +192,35 @@ done
 # ─── Species art: 3 frames each (F0, F1, F2) ────────────────────────────────
 # Each frame = 4 lines (L1..L4). Selected by $FRAME.
 case "$SPECIES" in
-  duck)
-    case $FRAME in
-      0) L1="   __";      L2=" <(${E} )___"; L3="  (  ._>";   L4="   \`--'" ;;
-      1) L1="   __";      L2=" <(${E} )___"; L3="  (  ._>";   L4="   \`--'~" ;;
-      2) L1="   __";      L2=" <(${E} )___"; L3="  (  .__>";  L4="   \`--'" ;;
-    esac ;;
-  goose)
-    case $FRAME in
-      0) L1="  (${E}>";    L2="   ||";       L3=" _(__)_";   L4="  ^^^^" ;;
-      1) L1=" (${E}>";     L2="   ||";       L3=" _(__)_";   L4="  ^^^^" ;;
-      2) L1="  (${E}>>";   L2="   ||";       L3=" _(__)_";   L4="  ^^^^" ;;
-    esac ;;
-  blob)
-    case $FRAME in
-      0) L1=" .----.";    L2="( ${E}  ${E} )"; L3="(      )";  L4=" \`----'" ;;
-      1) L1=".------.";   L2="( ${E}  ${E} )"; L3="(       )"; L4="\`------'" ;;
-      2) L1="  .--.";     L2=" (${E}  ${E})";  L3=" (    )";   L4="  \`--'" ;;
-    esac ;;
-  cat)
-    case $FRAME in
-      0) L1=" /\\_/\\";   L2="( ${E}   ${E})"; L3="(  ω  )";  L4="(\")_(\")" ;;
-      1) L1=" /\\_/\\";   L2="( ${E}   ${E})"; L3="(  ω  )";  L4="(\")_(\")~" ;;
-      2) L1=" /\\-/\\";   L2="( ${E}   ${E})"; L3="(  ω  )";  L4="(\")_(\")" ;;
-    esac ;;
-  dragon)  # Clawd (Claude Code mascot) — state-driven: work(노트북) / rest(커피) / sleep(zzz)
+  dragon|clawd)  # Clawd (Claude Code mascot) — work(노트북)/rest(커피)/sleep(zzz). "dragon"=legacy alias
     case "$CLAWD_STATE" in
       work)
         render_px "${CLAWD_WORK[@]}";   CLAWD_LINES=("${PX_LINES[@]}")
         render_px "${LAPTOP[@]}";       clawd_attach_right ;;
+      wait)
+        render_px "${CLAWD_OPEN[@]}";   CLAWD_LINES=("${PX_LINES[@]}")
+        hg=⏳; [ $(( _now % 2 )) -eq 1 ] && hg=⌛   # 모래시계 뒤집기 애니
+        CLAWD_LINES[2]="${CLAWD_LINES[2]}   ${hg}" ;;
       rest)
-        render_px "${CLAWD_CLOSED[@]}"; CLAWD_LINES=("${PX_LINES[@]}")
+        render_px "${CLAWD_OPEN[@]}";   CLAWD_LINES=("${PX_LINES[@]}")
         render_px "${COFFEE[@]}";       clawd_attach_right ;;
       sleep)
         render_px "${CLAWD_CLOSED[@]}"; CLAWD_LINES=("${PX_LINES[@]}")
         zc=$'\033[38;2;130;160;215m'
         CLAWD_LINES=( "            ${zc}z${NC}" "          ${zc}z${NC}" "${CLAWD_LINES[@]}" ) ;;
-    esac ;;
-  octopus)
-    case $FRAME in
-      0) L1=" .----.";   L2="( ${E}  ${E} )"; L3="(______)"; L4="/\\/\\/\\/\\" ;;
-      1) L1=" .----.";   L2="( ${E}  ${E} )"; L3="(______)"; L4="\\/\\/\\/\\/" ;;
-      2) L1=" .----.";   L2="( ${E}  ${E} )"; L3="(______)"; L4="/\\/\\/\\/\\" ;;
-    esac ;;
-  owl)
-    case $FRAME in
-      0) L1=" /\\  /\\";  L2="((${E})(${E}))"; L3="(  ><  )"; L4=" \`----'" ;;
-      1) L1=" /\\  /\\";  L2="((${E})(${E}))"; L3="(  ><  )"; L4=" .----." ;;
-      2) L1=" /\\  /\\";  L2="((${E})(-))";    L3="(  ><  )"; L4=" \`----'" ;;
-    esac ;;
-  penguin)
-    case $FRAME in
-      0) L1=" .---.";    L2=" (${E}>${E})";   L3="/(   )\\"; L4=" \`---'" ;;
-      1) L1=" .---.";    L2=" (${E}>${E})";   L3="|(   )|";  L4=" \`---'" ;;
-      2) L1=" .---.";    L2=" (${E}>${E})";   L3="/(   )\\"; L4=" \`---'" ;;
-    esac ;;
-  turtle)
-    case $FRAME in
-      0) L1=" _,--._";   L2="( ${E}  ${E} )"; L3="[______]"; L4="\`\`    \`\`" ;;
-      1) L1=" _,--._";   L2="( ${E}  ${E} )"; L3="[______]"; L4=" \`\`  \`\`" ;;
-      2) L1=" _,--._";   L2="( ${E}  ${E} )"; L3="[======]"; L4="\`\`    \`\`" ;;
-    esac ;;
-  snail)
-    case $FRAME in
-      0) L1="${E}   .--."; L2="\\  ( @ )";   L3=" \\_\`--'"; L4="~~~~~~~" ;;
-      1) L1=" ${E}  .--."; L2="|  ( @ )";   L3=" \\_\`--'"; L4="~~~~~~~" ;;
-      2) L1="${E}   .--."; L2="\\  ( @ )";   L3=" \\_\`--'"; L4=" ~~~~~~" ;;
-    esac ;;
-  ghost)
-    case $FRAME in
-      0) L1=" .----.";   L2="/ ${E}  ${E} \\"; L3="|      |"; L4="~\`~\`\`~\`~" ;;
-      1) L1=" .----.";   L2="/ ${E}  ${E} \\"; L3="|      |"; L4="\`~\`~~\`~\`" ;;
-      2) L1=" .----.";   L2="/ ${E}  ${E} \\"; L3="|      |"; L4="~~\`~~\`~~" ;;
-    esac ;;
-  axolotl)
-    case $FRAME in
-      0) L1="}~(____)~{"; L2="}~(${E}..${E})~{"; L3=" (.--.)";  L4=" (_/\\_)" ;;
-      1) L1="~}(____){~"; L2="~}(${E}..${E}){~"; L3=" (.--.)";  L4=" (_/\\_)" ;;
-      2) L1="}~(____)~{"; L2="}~(${E}..${E})~{"; L3=" ( -- )";  L4=" ~_/\\_~" ;;
-    esac ;;
-  capybara)
-    case $FRAME in
-      0) L1="n______n";  L2="( ${E}    ${E} )"; L3="(  oo  )"; L4="\`------'" ;;
-      1) L1="n______n";  L2="( ${E}    ${E} )"; L3="(  Oo  )"; L4="\`------'" ;;
-      2) L1="u______n";  L2="( ${E}    ${E} )"; L3="(  oo  )"; L4="\`------'" ;;
-    esac ;;
-  cactus)
-    case $FRAME in
-      0) L1="n ____ n";  L2="||${E}  ${E}||"; L3="|_|  |_|"; L4="  |  |" ;;
-      1) L1="  ____";    L2="n|${E}  ${E}|n"; L3="|_|  |_|"; L4="  |  |" ;;
-      2) L1="n ____ n";  L2="||${E}  ${E}||"; L3="|_|  |_|"; L4="  |  |" ;;
-    esac ;;
-  robot)
-    case $FRAME in
-      0) L1=" .[||].";   L2="[ ${E}  ${E} ]"; L3="[ ==== ]"; L4="\`------'" ;;
-      1) L1=" .[||].";   L2="[ ${E}  ${E} ]"; L3="[ -==- ]"; L4="\`------'" ;;
-      2) L1=" .[||].";   L2="[ ${E}  ${E} ]"; L3="[ ==== ]"; L4="\`------'" ;;
-    esac ;;
-  rabbit)
-    case $FRAME in
-      0) L1=" (\\__/)";  L2="( ${E}  ${E} )"; L3="=(  ..  )="; L4="(\")__(\")" ;;
-      1) L1=" (|__/)";   L2="( ${E}  ${E} )"; L3="=(  ..  )="; L4="(\")__(\")" ;;
-      2) L1=" (\\__/)";  L2="( ${E}  ${E} )"; L3="=( .  . )="; L4="(\")__(\")" ;;
-    esac ;;
-  mushroom)
-    case $FRAME in
-      0) L1="-o-OO-o-";  L2="(________)";  L3="  |${E}${E}|"; L4="  |__|" ;;
-      1) L1="-O-oo-O-";  L2="(________)";  L3="  |${E}${E}|"; L4="  |__|" ;;
-      2) L1="-o-OO-o-";  L2="(________)";  L3="  |${E}${E}|"; L4="  |__|" ;;
-    esac ;;
-  chonk)
-    case $FRAME in
-      0) L1="/\\    /\\"; L2="( ${E}    ${E} )"; L3="(  ..  )"; L4="\`------'" ;;
-      1) L1="/\\    /|";  L2="( ${E}    ${E} )"; L3="(  ..  )"; L4="\`------'" ;;
-      2) L1="/\\    /\\"; L2="( ${E}    ${E} )"; L3="(  ..  )"; L4="\`------'~" ;;
+      idea)
+        render_px "${CLAWD_OPEN[@]}";   CLAWD_LINES=("${PX_LINES[@]}")
+        CLAWD_LINES=( "      ✨ 💡 ✨" "${CLAWD_LINES[@]}" ) ;;
+      shower)
+        render_px "${CLAWD_CLOSED[@]}"; CLAWD_LINES=("${PX_LINES[@]}")
+        bc=$'\033[38;2;150;190;230m'                       # 물/거품 색
+        if [ $(( _now % 2 )) -eq 0 ]; then w="╎┊╎┊╎"; else w="┊╎┊╎┊"; fi
+        lz=( "   " "  ${bc}◦${NC}" "   " "  ${bc}°${NC}" "   " )   # 왼쪽 거품 (3칸 고정)
+        rz=( " ${bc}◦${NC}" "  " " ${bc}°${NC}" "  " " ${bc}◦${NC}" )  # 오른쪽 거품 (2칸 고정)
+        for i in 0 1 2 3 4; do
+          CLAWD_LINES[$i]="${lz[$i]}${CLAWD_LINES[$i]}${rz[$i]}"
+        done
+        CLAWD_LINES=( "          ${bc}▟▆▆▆▙${NC}" "          ${bc}${w}${NC}" "${CLAWD_LINES[@]}" ) ;;
     esac ;;
   *)
     L1="(${E}${E})"; L2="(  )"; L3=""; L4="" ;;
@@ -320,7 +246,7 @@ case "$HAT" in
   tinyduck)  HAT_LINE="  ,>" ;;
 esac
 # Clawd (dragon slot) wears no hat — its silhouette reads better bare
-[ "$SPECIES" = "dragon" ] && HAT_LINE=""
+[ "$IS_CLAWD" = 1 ] && HAT_LINE=""
 
 # ─── Reaction bubble (with TTL check) ────────────────────────────────────────
 BUBBLE=""
@@ -356,7 +282,7 @@ if [ -n "$REACTION" ] && [ "$REACTION" != "null" ] && [ "$REACTION" != "" ]; the
 fi
 
 # ─── Build art lines ─────────────────────────────────────────────────────────
-if [ "$SPECIES" = "dragon" ]; then
+if [ "$IS_CLAWD" = 1 ]; then
     ART_LINES=("${CLAWD_LINES[@]}")   # pre-colored Clawd pixel lines
     CLAWD_PRECOLORED=1
 else
@@ -384,7 +310,7 @@ done
 ALL_LINES+=("$NAME_LINE"); ALL_COLORS+=("$DIM")
 
 ART_W=14
-[ "$SPECIES" = "dragon" ] && ART_W=30   # Clawd + side prop (laptop/coffee)
+[ "$IS_CLAWD" = 1 ] && ART_W=30   # Clawd + side prop (laptop/coffee)
 ART_COUNT=${#ALL_LINES[@]}
 
 # ─── Speech bubble (left of art, word-wrapped) ──────────────────────────────

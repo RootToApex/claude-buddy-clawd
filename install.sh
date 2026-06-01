@@ -19,9 +19,9 @@ chmod +x "$SL" "$HERE"/hooks/*.sh
 mkdir -p "$STATE_DIR"
 if [ ! -f "$STATE_DIR/status.json" ]; then
   cat > "$STATE_DIR/status.json" <<'JSON'
-{"name":"클코","species":"dragon","rarity":"uncommon","stars":"★★","face":"<·~·>","eye":"·","shiny":false,"hat":"none","reaction":"","muted":false,"achievement":""}
+{"name":"클코","species":"clawd","rarity":"uncommon","stars":"★★","face":"<·~·>","eye":"·","shiny":false,"hat":"none","reaction":"","muted":false,"achievement":""}
 JSON
-  echo "• seeded $STATE_DIR/status.json (클코 · dragon)"
+  echo "• seeded $STATE_DIR/status.json (클코 · clawd)"
 fi
 
 # 2) Wire status line + hooks into settings.json (backup first)
